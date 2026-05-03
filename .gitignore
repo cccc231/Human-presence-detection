@@ -1,0 +1,10 @@
+build/
+sdkconfig
+sdkconfig.old
+*.pyc
+__pycache__/
+.vscode/
+.claude/
+.spec-workflow/
+新建 文本文档.txt
+23f424aa-8b07-445a-9589-6525e9758934.png
