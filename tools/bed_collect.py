@@ -4,10 +4,12 @@ CSI 数据采集脚本（床边检测用）
 从 ESP32 RX 串口读取原始 I/Q 数据，计算振幅并保存到 CSV。
 用于采集空床、躺下、起床等场景的数据样本。
 
+采集时长包含：动作前静止 → 动作过程 → 动作后静止，共约 15-20 秒。
+
 用法:
-  python tools/bed_collect.py --port COM28 --label empty --duration 30
-  python tools/bed_collect.py --port COM28 --label lying --duration 30
-  python tools/bed_collect.py --port COM28 --label getup --duration 30
+  python tools/bed_collect.py --port COM28 --label empty --duration 20
+  python tools/bed_collect.py --port COM28 --label lying --duration 20
+  python tools/bed_collect.py --port COM28 --label getup --duration 20
 """
 
 import argparse
@@ -53,7 +55,7 @@ def main():
     parser.add_argument("--baud", type=int, default=115200, help="波特率")
     parser.add_argument("--label", required=True, choices=["empty", "lying", "getup"],
                         help="场景标签: empty=空床, lying=躺下过程, getup=起床过程")
-    parser.add_argument("--duration", type=int, default=30, help="采集时长(秒), 默认30")
+    parser.add_argument("--duration", type=int, default=20, help="采集时长(秒), 默认20")
     parser.add_argument("--delay", type=int, default=5, help="开始前等待(秒)")
     parser.add_argument("--output", default=None, help="输出文件名 (默认: data/bed_<label>.csv)")
     args = parser.parse_args()
@@ -82,9 +84,9 @@ def main():
 
     if args.delay > 0:
         hint = {
-            "empty": "请确保床上无人",
-            "lying": "准备好了就躺到床上",
-            "getup": "请先躺在床上，准备好了就起来",
+            "empty": "请确保床上无人，保持空床",
+            "lying": "先保持站立/坐着，倒计时结束后再躺下",
+            "getup": "先躺在床上，倒计时结束后再起来",
         }
         print(f"\n等待 {args.delay} 秒 ({hint[args.label]})...")
         for i in range(args.delay, 0, -1):
