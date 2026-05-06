@@ -20,7 +20,7 @@ except ImportError:
     sys.exit(1)
 
 CSI_LINE_PATTERN = re.compile(
-    r"((?:\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})|SYNCING_\d+s),\s*(有人|没人),\s*([\d.]+)"
+    r"((?:\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})|SYNCING_\d+s),\s*(有人|没人),\s*([\d.]+)(?:,\s*(\d+)/(\d+))?"
 )
 
 # ANSI color codes
@@ -76,7 +76,7 @@ def main():
     writer = csv.writer(csv_file)
 
     if not file_exists:
-        writer.writerow(["timestamp", "status", "metric"])
+        writer.writerow(["timestamp", "status", "metric", "presence_count"])
         csv_file.flush()
 
     stop_event = threading.Event()
@@ -114,14 +114,18 @@ def main():
             match = CSI_LINE_PATTERN.match(line)
             status = match.group(2)
             metric = float(match.group(3))
+            present_count = match.group(4)
+            total_count = match.group(5)
             timestamp = datetime.now().strftime("%H:%M:%S")
 
-            writer.writerow([timestamp, status, f"{metric:.4f}"])
+            count_str = f"{present_count}/{total_count}" if present_count else ""
+            writer.writerow([timestamp, status, f"{metric:.4f}", count_str])
             csv_file.flush()
             line_count += 1
 
             colored_status = colorize_status(status)
-            print(f"  [{timestamp}] {colored_status}  (metric={metric:.4f})  [#{line_count}]")
+            ratio_info = f"  [{present_count}/{total_count}]" if present_count else ""
+            print(f"  [{timestamp}] {colored_status}  (metric={metric:.4f}){ratio_info}  [#{line_count}]")
 
     except KeyboardInterrupt:
         print(f"\n{'=' * 60}")
