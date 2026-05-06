@@ -1,5 +1,54 @@
 # 操作记录 (CHANGELOG)
 
+## 2026-05-06 - v3: 生命体征监测（复现 IEEE JTEHM 2025 论文）
+
+### 背景
+复现论文 "Design and Evaluation of Volunteer User Trials of Unobtrusive Vital Signs Monitoring for Older People in Care Using Wi-Fi CSI Sensing" (Alzaabi et al.)。使用 WiFi CSI 从子载波信号中提取呼吸率(RR)和心率(HR)。
+
+### 改动内容
+
+#### 1. TX 固件 (`tx/main/tx_main.c`)
+- `CONFIG_SEND_FREQUENCY` 从 80 改为 **120**（论文使用 120 PPS）
+
+#### 2. RX CSI 处理 (`rx/main/csi_processor.c`)
+- **完全重写**：不再计算振幅，直接输出原始 I/Q 数据到串口
+- 输出格式：`CSI,<timestamp_us>,<rssi>,<num_sub>,<I0>,<Q0>,<I1>,<Q1>,...`
+- 移除 `csi_snapshot_t` 和 `csi_snapshot_queue`
+- 任务栈增加到 8192
+
+#### 3. RX CSI 头文件 (`rx/main/csi_processor.h`)
+- 移除 `csi_snapshot_t` 结构体和 `csi_snapshot_queue`
+- `CSI_QUEUE_SIZE` 改为 40
+- 保留 `csi_raw_t` 结构体（简化版）
+
+#### 4. RX 主入口 (`rx/main/rx_main.c`)
+- 移除 `presence_detector_init()` 调用
+- 移除相关 include
+- 更新日志信息为生命体征模式
+
+#### 5. RX 构建配置 (`rx/main/CMakeLists.txt`)
+- SRCS 移除 presence_detector.c（不参与编译）
+
+#### 6. 新增 Python 脚本 (`tools/vital_signs.py`)
+- 完整论文信号处理流水线实现：
+  - 数据采集（串口读取 CSI I/Q 原始数据）
+  - 振幅提取：`amp = sqrt(I² + Q²)`
+  - 插值重采样（非均匀→均匀，RR: 40Hz, HR: 60Hz）
+  - DWT db4 小波滤波（RR: level 4-6, HR: level 2-4）
+  - PCA 降维（52子载波 → 10主成分）
+  - PC-SampEn 选择最规则主成分
+  - CWT Morlet 小波提取呼吸率/心率
+- 依赖：numpy, scipy, PyWavelets, scikit-learn, nolds, pyserial
+- 用法：`python tools/vital_signs.py --port COM28 --duration 120`
+
+### 未改动文件
+- `tools/serial_logger.py`：保持原样（用于存在检测模式）
+
+### 备份
+- `backup/v3_vital_signs/` 包含所有相关源文件
+
+---
+
 ## 2026-05-06 - v2: 双指标检测 + 1秒聚合
 
 ### 背景
