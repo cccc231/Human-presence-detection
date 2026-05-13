@@ -55,18 +55,72 @@ except ImportError:
     sys.exit(1)
 
 try:
-    import nolds
-except ImportError:
-    print("错误: pip install nolds")
-    sys.exit(1)
-
-try:
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 except ImportError:
     print("错误: pip install matplotlib")
     sys.exit(1)
+
+
+# ============================================================
+# SampEn 实现（纯 numpy，不依赖 nolds）
+# ============================================================
+
+def sampen(signal_1d, emb_dim=3, tolerance_factor=0.1):
+    """
+    计算 Sample Entropy（纯 numpy 实现）。
+
+    SampEn = -ln(B / A)
+    A = 维度 m 下模板匹配的对数
+    B = 维度 m+1 下模板匹配的对数
+    匹配条件: max|X_i - X_j| < r,  r = tolerance_factor * std(signal)
+
+    参数:
+      signal_1d: 输入信号
+      emb_dim: 嵌入维度 m（默认 3）
+      tolerance_factor: 容差因子（r = factor × std）
+
+    返回:
+      SampEn 值（float）。如果无法计算返回 inf。
+    """
+    N = len(signal_1d)
+    if N < 2 * emb_dim + 2:
+        return float('inf')
+
+    std = np.std(signal_1d)
+    r = tolerance_factor * std
+    if r == 0:
+        return float('inf')
+
+    # 构建模板矩阵 (N-m, m) 和 (N-m, m+1)
+    m = emb_dim
+    n_templates = N - m
+
+    # 维度 m 的模板
+    templates_m = np.array([signal_1d[i:i+m] for i in range(n_templates)])
+    # 维度 m+1 的模板
+    templates_m1 = np.array([signal_1d[i:i+m+1] for i in range(N - m - 1)])
+
+    # 计算距离矩阵（用 Chebyshev 距离 = max|差值|）
+    # A: 维度 m 下，i≠j 的匹配对数
+    A = 0
+    for i in range(n_templates):
+        # 计算模板 i 与所有 j>i 的距离
+        diff = np.max(np.abs(templates_m[i+1:] - templates_m[i]), axis=1)
+        A += np.sum(diff < r)
+
+    # B: 维度 m+1 下，i≠j 的匹配对数
+    n_templates_m1 = N - m - 1
+    B = 0
+    for i in range(n_templates_m1):
+        diff = np.max(np.abs(templates_m1[i+1:] - templates_m1[i]), axis=1)
+        B += np.sum(diff < r)
+
+    if A == 0:
+        return float('inf')
+
+    return -np.log(B / A) if B > 0 else float('inf')
 
 
 # ============================================================
@@ -170,14 +224,9 @@ def compute_sliding_sampen(signal_1d, window=300, step=10,
 
     for i in range(window, n, step):
         segment = signal_1d[i-window:i]
-        std = np.std(segment)
-        r = tolerance_factor * std
-        if r == 0:
-            indices.append(i)
-            sampen_values.append(0)
-            continue
         try:
-            se = nolds.sampen(segment, emb_dim=emb_dim, tolerance=r)
+            se = sampen(segment, emb_dim=emb_dim,
+                        tolerance_factor=tolerance_factor)
             indices.append(i)
             sampen_values.append(se)
         except Exception:
