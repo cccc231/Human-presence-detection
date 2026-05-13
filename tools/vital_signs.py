@@ -48,12 +48,6 @@ except ImportError:
     print("错误: pip install scikit-learn")
     sys.exit(1)
 
-try:
-    import nolds
-except ImportError:
-    print("错误: pip install nolds")
-    sys.exit(1)
-
 # --- Constants from paper ---
 DWT_WAVELET = 'db4'
 DWT_LEVEL = 6
@@ -188,16 +182,32 @@ def apply_pca(data_2d, n_components):
 
 
 def compute_sampen(signal_1d, m, r_factor):
-    """Compute Sample Entropy using nolds library."""
-    if len(signal_1d) < 20:
+    """Compute Sample Entropy (pure numpy, no nolds dependency)."""
+    N = len(signal_1d)
+    if N < 2 * m + 2:
         return float('inf')
-    r = r_factor * np.std(signal_1d)
+    std = np.std(signal_1d)
+    r = r_factor * std
     if r == 0:
         return float('inf')
-    try:
-        return nolds.sampen(signal_1d, emb_dim=m, tolerance=r)
-    except Exception:
+
+    n_templates = N - m
+    templates_m = np.array([signal_1d[i:i+m] for i in range(n_templates)])
+    templates_m1 = np.array([signal_1d[i:i+m+1] for i in range(N - m - 1)])
+
+    A = 0
+    for i in range(n_templates):
+        diff = np.max(np.abs(templates_m[i+1:] - templates_m[i]), axis=1)
+        A += np.sum(diff < r)
+
+    B = 0
+    for i in range(N - m - 1):
+        diff = np.max(np.abs(templates_m1[i+1:] - templates_m1[i]), axis=1)
+        B += np.sum(diff < r)
+
+    if A == 0:
         return float('inf')
+    return -np.log(B / A) if B > 0 else float('inf')
 
 
 def select_best_pc(components):
