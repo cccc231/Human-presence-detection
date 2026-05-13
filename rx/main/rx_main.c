@@ -11,7 +11,6 @@
 #include "esp_mac.h"
 
 #include "csi_processor.h"
-#include "bed_detector.h"
 
 static const char *TAG = "csi_rx";
 
@@ -100,7 +99,6 @@ void app_main(void)
     ESP_ERROR_CHECK(ret);
 
     csi_processor_init();
-    bed_detector_init();
     wifi_init();
     csi_init();
     esp_now_init_rx();

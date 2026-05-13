@@ -1,10 +1,8 @@
 #include "csi_processor.h"
-#include "bed_detector.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -74,19 +72,6 @@ static void csi_processor_task(void *arg)
             printf(",%d,%d", (int)real, (int)imag);
         }
         printf("\n");
-
-        /* 计算振幅并发送给 bed_detector */
-        if (bed_snapshot_queue != NULL) {
-            bed_snapshot_t snap;
-            snap.num_sub = num_subcarriers;
-            snap.timestamp = raw.timestamp;
-            for (uint16_t i = 0; i < num_subcarriers; i++) {
-                float re = (float)raw.buf[offset + 2 * i + 1];
-                float im = (float)raw.buf[offset + 2 * i];
-                snap.amplitudes[i] = sqrtf(re * re + im * im);
-            }
-            xQueueSend(bed_snapshot_queue, &snap, 0);
-        }
     }
 }
 
