@@ -441,6 +441,221 @@ def generate_plots(results, output_dir):
 
 
 # ============================================================
+# 参数扫描
+# ============================================================
+
+def preprocess_file(filepath, n_pca=5, target_fs=40.0, dwt_level=6):
+    """
+    预处理单个文件：加载 → 重采样 → DWT → PCA。
+    返回预处理结果（不含 SampEn，供参数扫描时复用）。
+    """
+    ts, ma, amp = load_csv(filepath)
+    if len(ts) < 100:
+        return None
+    t_uniform, amp_resampled, fs = resample_to_uniform(ts, amp, target_fs)
+    if t_uniform is None:
+        return None
+    f_ma = interp1d((ts - ts[0]) / 1e6, ma, kind='linear',
+                    fill_value='extrapolate')
+    ma_resampled = f_ma(t_uniform)
+    amp_filtered = dwt_lowpass(amp_resampled, 'db4', dwt_level)
+    components, pca_model = apply_pca(amp_filtered, n_pca)
+    return {
+        't_uniform': t_uniform,
+        'ma_resampled': ma_resampled,
+        'components': components,
+        'pca_explained_var': pca_model.explained_variance_ratio_,
+    }
+
+
+def run_detection(preprocessed, sampen_window, sampen_step,
+                  cusum_delta_f, cusum_h_f):
+    """
+    在预处理数据上运行 SampEn + CUSUM 检测。
+    返回 events 列表。
+    """
+    components = preprocessed['components']
+    ma = preprocessed['ma_resampled']
+    t = preprocessed['t_uniform']
+    n_pca = components.shape[1]
+
+    # 对每个 PC 计算 SampEn
+    best_pc = 0
+    best_var = 0
+    pc_sampen = {}
+    for i in range(n_pca):
+        indices, se_values = compute_sliding_sampen(
+            components[:, i], sampen_window, sampen_step)
+        pc_sampen[i] = (indices, se_values)
+        if len(se_values) > 0 and np.var(se_values) > best_var:
+            best_var = np.var(se_values)
+            best_pc = i
+
+    se_indices, se_values = pc_sampen[best_pc]
+    if len(se_values) < 5:
+        return []
+
+    # CUSUM 检测
+    _, triggers = detect_sampen_transitions(se_values, cusum_delta_f, cusum_h_f)
+
+    # 方向判断
+    events = []
+    for idx_in_se, se_val in triggers:
+        amp_idx = int(se_indices[idx_in_se])
+        if amp_idx >= len(ma):
+            continue
+        direction = determine_direction(ma, amp_idx)
+        events.append({
+            'time_sec': t[amp_idx],
+            'sampen': se_val,
+            'direction': direction,
+            'amp_idx': amp_idx,
+        })
+    return events
+
+
+def score_scan(empty_events, lying_events, getup_events):
+    """
+    评分：空床0误报 + 躺下1次lying + 起床1次sitting。
+    """
+    score = 0
+
+    # 空床: 必须 0 事件
+    if len(empty_events) == 0:
+        score += 1000
+    else:
+        score -= 10000 * len(empty_events)
+        return score
+
+    # 躺下: 必须恰好 1 次 lying
+    lying_count = sum(1 for e in lying_events if e['direction'] == 'lying')
+    if lying_count == 1:
+        score += 500
+        # 延迟越小越好
+        lying_ev = [e for e in lying_events if e['direction'] == 'lying'][0]
+        score -= lying_ev['time_sec'] * 10
+    else:
+        score -= 1000 * abs(lying_count - 1)
+
+    # 起床: 必须恰好 1 次 sitting
+    sitting_count = sum(1 for e in getup_events if e['direction'] == 'sitting')
+    if sitting_count == 1:
+        score += 500
+        getup_ev = [e for e in getup_events if e['direction'] == 'sitting'][0]
+        score -= getup_ev['time_sec'] * 10
+    else:
+        score -= 1000 * abs(sitting_count - 1)
+
+    # 额外事件惩罚
+    extra_lying = sum(1 for e in lying_events if e['direction'] != 'lying')
+    extra_getup = sum(1 for e in getup_events if e['direction'] != 'sitting')
+    score -= (extra_lying + extra_getup) * 50
+
+    return score
+
+
+def scan_parameters(preproc_empty, preproc_lying, preproc_getup):
+    """
+    扫描 SampEn 窗口/步长 + CUSUM delta/h，找最优参数组合。
+    """
+    window_list = [200, 300, 400, 500]
+    step_list = [5, 10, 20]
+    delta_list = [0.3, 0.5, 0.8, 1.0, 1.5]
+    h_list = [2, 3, 5, 8, 10, 15, 20]
+
+    results = []
+    count = 0
+    total = len(window_list) * len(step_list) * len(delta_list) * len(h_list)
+    print(f"  参数组合: {total}")
+
+    for win in window_list:
+        for step in step_list:
+            # 预计算 SampEn（最耗时的部分）
+            se_empty = {}
+            se_lying = {}
+            se_getup = {}
+            for i in range(preproc_empty['components'].shape[1]):
+                se_empty[i] = compute_sliding_sampen(
+                    preproc_empty['components'][:, i], win, step)
+                se_lying[i] = compute_sliding_sampen(
+                    preproc_lying['components'][:, i], win, step)
+                se_getup[i] = compute_sliding_sampen(
+                    preproc_getup['components'][:, i], win, step)
+
+            for delta_f in delta_list:
+                for h_f in h_list:
+                    count += 1
+                    if count % 50 == 0:
+                        print(f"  已扫描 {count}/{total}...")
+
+                    # 对三组数据运行检测
+                    ev_e = run_detection_fast(
+                        preproc_empty, se_empty, delta_f, h_f)
+                    ev_l = run_detection_fast(
+                        preproc_lying, se_lying, delta_f, h_f)
+                    ev_g = run_detection_fast(
+                        preproc_getup, se_getup, delta_f, h_f)
+
+                    sc = score_scan(ev_e, ev_l, ev_g)
+                    if sc > 0:
+                        results.append({
+                            'score': sc,
+                            'sampen_window': win,
+                            'sampen_step': step,
+                            'cusum_delta_f': delta_f,
+                            'cusum_h_f': h_f,
+                            'empty_events': len(ev_e),
+                            'lying_events': ev_l,
+                            'getup_events': ev_g,
+                            'lying_count': sum(1 for e in ev_l
+                                               if e['direction'] == 'lying'),
+                            'sitting_count': sum(1 for e in ev_g
+                                                 if e['direction'] == 'sitting'),
+                        })
+
+    results.sort(key=lambda x: x['score'], reverse=True)
+    print(f"  扫描完成: {count} 组, 有效: {len(results)} 组")
+    return results
+
+
+def run_detection_fast(preproc, precomputed_se, cusum_delta_f, cusum_h_f):
+    """用预计算的 SampEn 快速运行 CUSUM 检测"""
+    components = preproc['components']
+    ma = preproc['ma_resampled']
+    t = preproc['t_uniform']
+    n_pca = components.shape[1]
+
+    # 选 SampEn 方差最大的 PC
+    best_pc = 0
+    best_var = 0
+    for i in range(n_pca):
+        _, se_vals = precomputed_se[i]
+        if len(se_vals) > 0 and np.var(se_vals) > best_var:
+            best_var = np.var(se_vals)
+            best_pc = i
+
+    se_indices, se_values = precomputed_se[best_pc]
+    if len(se_values) < 5:
+        return []
+
+    _, triggers = detect_sampen_transitions(se_values, cusum_delta_f, cusum_h_f)
+
+    events = []
+    for idx_in_se, se_val in triggers:
+        amp_idx = int(se_indices[idx_in_se])
+        if amp_idx >= len(ma):
+            continue
+        direction = determine_direction(ma, amp_idx)
+        events.append({
+            'time_sec': t[amp_idx],
+            'sampen': se_val,
+            'direction': direction,
+            'amp_idx': amp_idx,
+        })
+    return events
+
+
+# ============================================================
 # 主函数
 # ============================================================
 
@@ -459,6 +674,8 @@ def main():
                         help="SampEn 步长（默认 10）")
     parser.add_argument("--n-pca", type=int, default=5,
                         help="PCA 成分数（默认 5）")
+    parser.add_argument("--scan", action="store_true",
+                        help="参数扫描模式（自动寻找最优 SampEn 窗口和 CUSUM 阈值）")
     args = parser.parse_args()
 
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -504,67 +721,163 @@ def main():
 
     else:
         # 三组数据对比分析
-        results = {}
+        files = {}
         for label in ['empty', 'lying', 'getup']:
             filepath = os.path.join(data_dir, f"bed_{label}.csv")
             if not os.path.exists(filepath):
-                print(f"跳过 {label}: 文件不存在 ({filepath})")
-                continue
+                print(f"错误: 找不到 {filepath}")
+                print(f"请先采集: python tools/bed_collect.py --port COM28 "
+                      f"--label {label}")
+                sys.exit(1)
+            files[label] = filepath
 
-            print(f"\n分析 {label}: {filepath}")
-            result = analyze_posture(
-                filepath, n_pca=args.n_pca,
-                sampen_window=args.sampen_window,
-                sampen_step=args.sampen_step)
+        if args.scan:
+            # ============ 参数扫描模式 ============
+            print("\n[1/4] 预处理三组数据（DWT + PCA）...")
+            preproc = {}
+            for label, filepath in files.items():
+                p = preprocess_file(filepath, n_pca=args.n_pca)
+                if p is None:
+                    print(f"  {label}: 预处理失败")
+                    sys.exit(1)
+                preproc[label] = p
+                print(f"  {label}: {len(p['t_uniform'])} 样本, "
+                      f"PCA方差比={p['pca_explained_var']}")
 
-            if 'error' in result:
-                print(f"  错误: {result['error']}")
-                continue
+            print("\n[2/4] 参数扫描...")
+            scan_results = scan_parameters(
+                preproc['empty'], preproc['lying'], preproc['getup'])
 
-            results[label] = result
+            if not scan_results:
+                print("  未找到有效参数组合。数据分离度可能不足。")
+                sys.exit(1)
 
-            print(f"  包数: {result['n_packets']}, 时长: {result['duration']:.1f}s")
-            print(f"  PCA 方差比: {result['pca_explained_var']}")
-            print(f"  最佳 PC: {result['best_pc']+1}")
-            print(f"  检测到 {len(result['events'])} 个事件:")
-            for ev in result['events']:
-                print(f"    t={ev['time_sec']:.1f}s, SampEn={ev['sampen']:.4f}, "
-                      f"方向={ev['direction']}")
+            best = scan_results[0]
+            print(f"\n[3/4] 最优参数 (score={best['score']}):")
+            print(f"  SampEn window   = {best['sampen_window']}")
+            print(f"  SampEn step     = {best['sampen_step']}")
+            print(f"  CUSUM delta_f   = {best['cusum_delta_f']}")
+            print(f"  CUSUM h_f       = {best['cusum_h_f']}")
+            print(f"  空床误报        = {best['empty_events']}")
+            print(f"  躺下 lying 检测  = {best['lying_count']}")
+            print(f"  起床 sitting 检测 = {best['sitting_count']}")
 
-        if not results:
-            print("\n没有有效数据。请先采集:")
-            print("  python tools/bed_collect.py --port COM28 --label empty")
-            print("  python tools/bed_collect.py --port COM28 --label lying")
-            print("  python tools/bed_collect.py --port COM28 --label getup")
-            sys.exit(1)
+            # Top 5
+            print(f"\n  Top 5:")
+            print(f"  {'win':>5s} {'step':>5s} {'delta':>6s} {'h':>5s} "
+                  f"{'FA':>4s} {'ly':>4s} {'st':>4s} {'score':>8s}")
+            for r in scan_results[:5]:
+                print(f"  {r['sampen_window']:5d} {r['sampen_step']:5d} "
+                      f"{r['cusum_delta_f']:6.2f} {r['cusum_h_f']:5.1f} "
+                      f"{r['empty_events']:4d} {r['lying_count']:4d} "
+                      f"{r['sitting_count']:4d} {r['score']:8.1f}")
 
-        # 生成图表
-        print(f"\n生成图表...")
-        generate_plots(results, output_dir)
+            # 用最优参数重新跑一遍，生成图表和报告
+            print(f"\n[4/4] 用最优参数生成图表...")
+            results = {}
+            for label in ['empty', 'lying', 'getup']:
+                result = analyze_posture(
+                    files[label], n_pca=args.n_pca,
+                    sampen_window=best['sampen_window'],
+                    sampen_step=best['sampen_step'],
+                    cusum_delta=best['cusum_delta_f'],
+                    cusum_h=best['cusum_h_f'])
+                results[label] = result
 
-        # 汇总报告
-        print(f"\n{'='*60}")
-        print("分析汇总:")
-        print(f"{'='*60}")
-        for label, result in results.items():
-            ev_count = len(result['events'])
-            lying_count = sum(1 for e in result['events']
+            generate_plots(results, output_dir)
+
+            # 生成参数文件
+            params_path = os.path.join(output_dir, "bed_posture_params.h")
+            with open(params_path, 'w', encoding='utf-8') as f:
+                f.write("/* CSI 体位检测参数 - 由 bed_posture_detect.py "
+                        "自动生成 */\n\n")
+                f.write("#pragma once\n\n")
+                f.write(f"#define POSTURE_SAMPEN_WINDOW  "
+                        f"{best['sampen_window']}\n")
+                f.write(f"#define POSTURE_SAMPEN_STEP    "
+                        f"{best['sampen_step']}\n")
+                f.write(f"#define POSTURE_CUSUM_DELTA_F  "
+                        f"{best['cusum_delta_f']:.2f}f\n")
+                f.write(f"#define POSTURE_CUSUM_H_F      "
+                        f"{best['cusum_h_f']:.1f}f\n")
+                f.write(f"#define POSTURE_N_PCA          {args.n_pca}\n")
+            print(f"参数文件已保存: {params_path}")
+
+            # 分析报告
+            report_path = os.path.join(output_dir, "posture_report.txt")
+            with open(report_path, 'w', encoding='utf-8') as f:
+                f.write("CSI 体位检测参数扫描报告\n")
+                f.write("=" * 50 + "\n\n")
+                f.write(f"最优参数: SampEn window={best['sampen_window']}, "
+                        f"step={best['sampen_step']}, "
+                        f"delta_f={best['cusum_delta_f']}, "
+                        f"h_f={best['cusum_h_f']}\n\n")
+                f.write("检测结果:\n")
+                for label, result in results.items():
+                    if 'error' in result:
+                        continue
+                    f.write(f"  [{label}] {len(result['events'])} 事件: ")
+                    for ev in result['events']:
+                        f.write(f"t={ev['time_sec']:.1f}s({ev['direction']}) ")
+                    f.write("\n")
+                f.write("\nTop 5 参数:\n")
+                for i, r in enumerate(scan_results[:5]):
+                    f.write(f"  {i+1}. win={r['sampen_window']} "
+                            f"step={r['sampen_step']} "
+                            f"delta={r['cusum_delta_f']} "
+                            f"h={r['cusum_h_f']} "
+                            f"score={r['score']}\n")
+            print(f"报告已保存: {report_path}")
+
+        else:
+            # ============ 普通分析模式 ============
+            results = {}
+            for label, filepath in files.items():
+                print(f"\n分析 {label}: {filepath}")
+                result = analyze_posture(
+                    filepath, n_pca=args.n_pca,
+                    sampen_window=args.sampen_window,
+                    sampen_step=args.sampen_step)
+
+                if 'error' in result:
+                    print(f"  错误: {result['error']}")
+                    continue
+
+                results[label] = result
+                print(f"  包数: {result['n_packets']}, "
+                      f"时长: {result['duration']:.1f}s")
+                print(f"  PCA 方差比: {result['pca_explained_var']}")
+                print(f"  最佳 PC: {result['best_pc']+1}")
+                print(f"  检测到 {len(result['events'])} 个事件:")
+                for ev in result['events']:
+                    print(f"    t={ev['time_sec']:.1f}s, "
+                          f"SampEn={ev['sampen']:.4f}, "
+                          f"方向={ev['direction']}")
+
+            generate_plots(results, output_dir)
+
+            # 汇总
+            print(f"\n{'='*60}")
+            print("分析汇总:")
+            print(f"{'='*60}")
+            for label, result in results.items():
+                ev_count = len(result['events'])
+                lying_c = sum(1 for e in result['events']
                               if e['direction'] == 'lying')
-            sitting_count = sum(1 for e in result['events']
+                sitting_c = sum(1 for e in result['events']
                                 if e['direction'] == 'sitting')
-            print(f"  [{label}] {ev_count} 事件 "
-                  f"(躺下={lying_count}, 坐起={sitting_count})")
+                print(f"  [{label}] {ev_count} 事件 "
+                      f"(躺下={lying_c}, 坐起={sitting_c})")
 
-        # 空床误报检查
-        if 'empty' in results:
-            fa = len(results['empty']['events'])
-            if fa > 0:
-                print(f"\n  WARNING: 空床数据有 {fa} 次误报!")
-                print(f"  可能需要调整 --sampen-window 或 CUSUM 阈值")
-            else:
-                print(f"\n  空床 0 误报 ✓")
+            if 'empty' in results:
+                fa = len(results['empty']['events'])
+                if fa > 0:
+                    print(f"\n  WARNING: 空床数据有 {fa} 次误报!")
+                    print(f"  建议: 运行 --scan 模式自动寻找最优参数")
+                else:
+                    print(f"\n  空床 0 误报 ✓")
 
-        print(f"\n输出文件: {output_dir}/posture_analysis.png")
+            print(f"\n输出: {output_dir}/posture_analysis.png")
 
 
 if __name__ == "__main__":
