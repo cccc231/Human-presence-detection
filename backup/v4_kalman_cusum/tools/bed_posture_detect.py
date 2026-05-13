@@ -6,7 +6,7 @@ CSI 体位变化检测脚本（per-subcarrier STD 方法）
       起床时身体离开信号路径 → 子载波波动变化小 → per-subcarrier STD 接近空床
 
 算法流程:
-  原始 CSI → 重采样 40Hz → 滑动窗口 per-subcarrier STD → 与空床基线比较
+  原始 CSI → 重采样 80Hz → 滑动窗口 per-subcarrier STD → 与空床基线比较
                                                               ↓
                                           > 50% 子载波 > 1.8x → lying
                                           否则但 ratio_mean > 1.2 → sitting
@@ -46,7 +46,7 @@ def load_csv(fp):
     return np.array(ts), np.array(ma), np.array(rows)
 
 
-def resample(ts, amp_2d, fs=40):
+def resample(ts, amp_2d, fs=80):
     t = (ts - ts[0]) / 1e6; dur = t[-1]; n_out = int(dur * fs)
     if n_out < 10: return None, None
     t_u = np.linspace(0, dur, n_out); out = np.zeros((n_out, amp_2d.shape[1]))
@@ -61,7 +61,7 @@ def resample(ts, amp_2d, fs=40):
 # ============================================================
 
 def detect_posture_events(amp_data, t_u, baseline_sub_std,
-                          win=200, step=40, ratio_th=1.8, sub_frac=0.5,
+                          win=400, step=80, ratio_th=1.8, sub_frac=0.5,
                           sit_th=1.2, cooldown_win=3):
     """
     滑动窗口 per-subcarrier STD 检测体位变化事件。
@@ -70,8 +70,8 @@ def detect_posture_events(amp_data, t_u, baseline_sub_std,
       amp_data: 重采样后的子载波振幅 (n_samples, n_sub)
       t_u: 均匀时间轴
       baseline_sub_std: 空床每子载波 STD 基线 (n_sub,)
-      win: 滑动窗口大小（样本，默认 200 @40Hz = 5s）
-      step: 窗口步长（样本，默认 40 @40Hz = 1s）
+      win: 滑动窗口大小（样本，默认 400 @80Hz = 5s）
+      step: 窗口步长（样本，默认 80 @80Hz = 1s）
       ratio_th: lying 判定的 per-subcarrier STD 比值阈值（默认 1.8）
       sub_frac: lying 需要的高比值子载波占比（默认 0.5 = 50%）
       sit_th: sitting 判定的 ratio_mean 下限（默认 1.2）
@@ -182,8 +182,8 @@ def detect_posture_events(amp_data, t_u, baseline_sub_std,
 def scan_params(amp_empty, amp_lying, amp_getup, t_e, t_l, t_g,
                 baseline_sub_std):
     """扫描 win/step/ratio_th/sub_frac/sit_th 找最优参数"""
-    win_list = [150, 200, 250, 300]
-    step_list = [20, 40, 60]
+    win_list = [300, 400, 500, 600]
+    step_list = [40, 80, 120]
     ratio_list = [1.5, 1.6, 1.8, 2.0]
     sub_frac_list = [0.4, 0.5, 0.6]
     sit_th_list = [1.1, 1.2, 1.3]
@@ -283,7 +283,7 @@ def generate_plots(results, baseline_sub_std, params, output_dir):
         if events:
             ax.legend(fontsize=8)
 
-    plt.suptitle(f'CSI Posture Detection (win={params["win"]}({params["win"]/40:.0f}s), '
+    plt.suptitle(f'CSI Posture Detection (win={params["win"]}({params["win"]/80:.0f}s), '
                  f'ratio_th={params["ratio_th"]}, sub_frac={params["sub_frac"]})',
                  fontsize=14)
     plt.tight_layout()
@@ -338,7 +338,7 @@ def main():
                         fill_value='extrapolate')
         raw[lb] = {'t_u': t_u, 'amp_r': amp_r, 'ma': f_ma(t_u),
                    'n_sub': amp_r.shape[1], 'n_samples': len(t_u)}
-        print(f"  {lb}: {len(ts)}包 -> {len(t_u)}样本 @40Hz, "
+        print(f"  {lb}: {len(ts)}包 -> {len(t_u)}样本 @80Hz, "
               f"{amp_r.shape[1]}子载波")
 
     # 空床基线
@@ -405,7 +405,7 @@ def main():
 
     else:
         # 默认参数模式
-        params = {'win': 200, 'step': 40, 'ratio_th': 1.8,
+        params = {'win': 400, 'step': 80, 'ratio_th': 1.8,
                   'sub_frac': 0.5, 'sit_th': 1.2}
 
         results = {}
