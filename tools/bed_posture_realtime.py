@@ -201,13 +201,14 @@ def monitor(ser, baseline_sub_std, n_sub,
     # 缓冲区: 存储 (timestamp, amp_vector)
     buffer = deque()
 
-    last_event = None      # 上次事件方向
-    last_event_time = 0    # 上次事件时间
-    cooldown_sec = 5       # 冷却时间
+    last_event = None
+    last_event_time = 0
+    cooldown_sec = 5
 
     last_check = time.time()
     running = True
     count = 0
+    last_status = time.time()
 
     try:
         while running:
@@ -246,15 +247,24 @@ def monitor(ser, baseline_sub_std, n_sub,
                     window_amps, baseline_sub_std,
                     ratio_th, sub_frac, sit_th)
 
+                ratio = np.mean(np.std(window_amps, axis=0)
+                                / (baseline_sub_std + 0.01)) if len(window_amps) > 0 else 0
+
+                # 每 3 秒打印状态（便于调试）
+                if now - last_status >= 3:
+                    last_status = now
+                    sys.stdout.write(f"\r  [{datetime.now().strftime('%H:%M:%S')}] "
+                                     f"包数={count}, 窗口={len(buffer)}, "
+                                     f"方向={direction}, ratio={ratio:.2f}    ")
+                    sys.stdout.flush()
+
                 if direction != 'quiet':
-                    ratio = np.mean(np.std(window_amps, axis=0)
-                                    / (baseline_sub_std + 0.01))
                     now_ts = datetime.now().strftime("%H:%M:%S")
 
-                    # 冷却检查：同方向不重复，异方向需冷却
+                    # 冷却检查
                     if direction != last_event or now - last_event_time > cooldown_sec:
-                        print(f"  [{now_ts}] *** {direction.upper()} *** "
-                              f"(ratio={ratio:.2f})")
+                        print(f"\n  [{now_ts}] *** {direction.upper()} *** "
+                              f"(ratio={ratio:.2f}, 窗口={len(buffer)}包)")
                         if writer:
                             writer.writerow([now_ts, direction,
                                              f"{ratio:.2f}",
@@ -264,18 +274,6 @@ def monitor(ser, baseline_sub_std, n_sub,
                             csv_file.flush()
                         last_event = direction
                         last_event_time = now
-
-                # 包率显示
-                if count % 600 == 0:
-                    direction = detect_from_window(
-                        window_amps, baseline_sub_std,
-                        ratio_th, sub_frac, sit_th)
-                    ratio = np.mean(np.std(window_amps, axis=0)
-                                    / (baseline_sub_std + 0.01)) if len(window_amps) > 0 else 0
-                    sys.stdout.write(
-                        f"\r  监测中: {count}包, 方向={direction}, "
-                        f"ratio={ratio:.2f}")
-                    sys.stdout.flush()
 
     except KeyboardInterrupt:
         print("\n\n用户中断")
