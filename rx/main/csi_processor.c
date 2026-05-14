@@ -41,6 +41,9 @@ static void csi_processor_task(void *arg)
 {
     csi_raw_t raw;
     int pkt_count = 0;
+    /* 预分配行缓冲，一次写入避免 printf 被看门狗中断截断 */
+    /* CSI,<20位ts>,<4位rssi>,<3位nsub> + 64对IQ各6字节 + 换行 + 尾零 */
+    char line_buf[MAX_CSI_LEN * 6 + 64];
 
     while (1) {
         if (xQueueReceive(csi_raw_queue, &raw, portMAX_DELAY) != pdTRUE) {
@@ -64,18 +67,26 @@ static void csi_processor_task(void *arg)
             num_subcarriers = MAX_SUBCARRIERS;
         }
 
-        /* 每 2 包输出 1 包，降低串口压力（115200 baud 不足以承载 120Hz 全量输出） */
-        if (pkt_count % 2 == 0) {
-            printf("CSI,%lld,%d,%d", (long long)raw.timestamp, (int)raw.rssi, (int)num_subcarriers);
+        /* 每 4 包输出 1 包: 120/4 = 30Hz, 30*200=6KB/s < 115200/10=11.5KB/s */
+        if (pkt_count % 4 == 0) {
+            int pos = snprintf(line_buf, sizeof(line_buf),
+                               "CSI,%lld,%d,%d",
+                               (long long)raw.timestamp,
+                               (int)raw.rssi,
+                               (int)num_subcarriers);
             for (uint16_t i = 0; i < num_subcarriers; i++) {
                 int8_t imag = raw.buf[offset + 2 * i];
                 int8_t real = raw.buf[offset + 2 * i + 1];
-                printf(",%d,%d", (int)real, (int)imag);
+                pos += snprintf(line_buf + pos, sizeof(line_buf) - pos,
+                                ",%d,%d", (int)real, (int)imag);
             }
-            printf("\n");
+            line_buf[pos++] = '\n';
+            line_buf[pos] = '\0';
+            /* 单次 write，不会被看门狗截断 */
+            fputs(line_buf, stdout);
         }
 
-        /* 每包都 yield，防止看门狗超时 */
+        /* 每包让出 CPU */
         taskYIELD();
     }
 }
