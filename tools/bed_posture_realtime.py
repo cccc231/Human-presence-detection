@@ -103,7 +103,7 @@ def detect_from_window(amps, baseline_sub_std,
 # 校准阶段
 # ============================================================
 
-def calibrate(ser, duration, verbose=True):
+def calibrate(ser, duration, verbose=True, raw_csv=None):
     """
     采集空床数据，建立 per-subcarrier STD 基线。
     返回: baseline_sub_std (n_sub,), n_sub
@@ -126,6 +126,14 @@ def calibrate(ser, duration, verbose=True):
     all_amps = []
     start = time.time()
     count = 0
+    raw_writer = None
+    raw_file = None
+    n_sub = 0
+
+    if raw_csv:
+        raw_file = open(raw_csv, "w", newline="", encoding="utf-8-sig")
+        raw_writer = csv.writer(raw_file)
+        # 表头等第一包确定子载波数后再写
 
     while time.time() - start < duration:
         raw = ser.readline()
@@ -143,8 +151,22 @@ def calibrate(ser, duration, verbose=True):
                     print(f"  [LOG] {line}")
             continue
 
-        _, n_sub, amp = parsed
+        ts_us, n_sub, amp = parsed
         all_amps.append(amp)
+
+        # 保存原始数据
+        if raw_writer is not None:
+            if count == 0:
+                # 写表头
+                header = ["timestamp_us", "rssi", "num_sub", "mean_amp"]
+                header += [f"amp_{i}" for i in range(n_sub)]
+                raw_writer.writerow(header)
+            mean_a = float(np.mean(amp))
+            row = [ts_us, 0, n_sub, f"{mean_a:.4f}"]
+            row += [f"{a:.4f}" for a in amp]
+            raw_writer.writerow(row)
+            raw_file.flush()
+
         count += 1
 
         if verbose and count % 120 == 0:
@@ -154,10 +176,11 @@ def calibrate(ser, duration, verbose=True):
 
     if count == 0:
         print("\n错误: 未收到任何 CSI 数据")
+        if raw_file:
+            raw_file.close()
         sys.exit(1)
 
     amps_array = np.array(all_amps)
-    # 用全部校准数据的 per-subcarrier STD 作为基线
     baseline_sub_std = np.std(amps_array, axis=0)
 
     if verbose:
@@ -167,7 +190,7 @@ def calibrate(ser, duration, verbose=True):
         print(f"  baseline_sub_std: mean={np.mean(baseline_sub_std):.3f}, "
               f"range=[{np.min(baseline_sub_std):.3f}, {np.max(baseline_sub_std):.3f}]")
 
-    return baseline_sub_std, n_sub
+    return baseline_sub_std, n_sub, raw_file  # 返回 raw_file 供 monitor 继续写入
 
 
 # ============================================================
@@ -176,7 +199,7 @@ def calibrate(ser, duration, verbose=True):
 
 def monitor(ser, baseline_sub_std, n_sub,
             window_sec, step_sec, ratio_th, sub_frac, sit_th,
-            output_csv=None):
+            output_csv=None, raw_file=None, raw_writer=None):
     """
     实时监测体位变化。
 
@@ -230,6 +253,15 @@ def monitor(ser, baseline_sub_std, n_sub,
             ts_sec = ts_us / 1e6
             buffer.append((ts_sec, amp))
             count += 1
+
+            # 保存原始数据
+            if raw_writer is not None:
+                mean_a = float(np.mean(amp))
+                row = [ts_us, 0, n_sub, f"{mean_a:.4f}"]
+                row += [f"{a:.4f}" for a in amp]
+                raw_writer.writerow(row)
+                if count % 60 == 0:
+                    raw_file.flush()
 
             # 移除过期数据
             cutoff = ts_sec - window_sec
@@ -305,8 +337,18 @@ def main():
                         help="lying 子载波比例 (默认 0.4)")
     parser.add_argument("--ratio-sitting", type=float, default=RATIO_SITTING,
                         help="sitting 触发下限 (默认 1.1)")
-    parser.add_argument("--output", default=None, help="输出 CSV 文件")
+    parser.add_argument("--output", default=None, help="事件输出 CSV 文件")
+    parser.add_argument("--save-raw", default=None,
+                        help="保存原始 CSI 数据到 CSV（默认: 自动命名到 data/ 目录）")
     args = parser.parse_args()
+
+    # 自动命名 raw 文件
+    if args.save_raw == "auto" or (args.save_raw is None and args.output is None):
+        os.makedirs(os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "data"), exist_ok=True)
+        ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        args.save_raw = os.path.join(base, "data", f"realtime_{ts_str}.csv")
 
     print("=" * 60)
     print("CSI 体位实时检测 (per-subcarrier STD)")
@@ -320,16 +362,26 @@ def main():
         sys.exit(1)
 
     # 1. 校准
-    baseline_sub_std, n_sub = calibrate(ser, args.calib)
+    baseline_sub_std, n_sub, raw_file = calibrate(ser, args.calib,
+                                                   raw_csv=args.save_raw)
+
+    # 重新获取 writer（calibrate 内部创建的，文件未关闭）
+    raw_writer = None
+    if raw_file is not None:
+        raw_writer = csv.writer(raw_file)
 
     # 2. 监测
     try:
         monitor(ser, baseline_sub_std, n_sub,
                 args.window, args.step,
                 args.ratio_lying, args.sub_frac, args.ratio_sitting,
-                args.output)
+                args.output, raw_file, raw_writer)
     finally:
+        if raw_file:
+            raw_file.close()
         ser.close()
+        if args.save_raw:
+            print(f"原始数据已保存: {args.save_raw}")
 
 
 if __name__ == "__main__":
