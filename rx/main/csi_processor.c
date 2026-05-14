@@ -40,11 +40,14 @@ void csi_rx_cb(void *ctx, wifi_csi_info_t *info)
 static void csi_processor_task(void *arg)
 {
     csi_raw_t raw;
+    int pkt_count = 0;
 
     while (1) {
         if (xQueueReceive(csi_raw_queue, &raw, portMAX_DELAY) != pdTRUE) {
             continue;
         }
+
+        pkt_count++;
 
         uint16_t offset = 0;
         if (raw.first_word_invalid) {
@@ -61,17 +64,19 @@ static void csi_processor_task(void *arg)
             num_subcarriers = MAX_SUBCARRIERS;
         }
 
-        /* 输出原始 I/Q 数据到串口
-         * 格式: CSI,<timestamp_us>,<rssi>,<num_sub>,<I0>,<Q0>,<I1>,<Q1>,...
-         * I/Q 顺序: buf[offset+2*i] = imag, buf[offset+2*i+1] = real
-         */
-        printf("CSI,%lld,%d,%d", (long long)raw.timestamp, (int)raw.rssi, (int)num_subcarriers);
-        for (uint16_t i = 0; i < num_subcarriers; i++) {
-            int8_t imag = raw.buf[offset + 2 * i];
-            int8_t real = raw.buf[offset + 2 * i + 1];
-            printf(",%d,%d", (int)real, (int)imag);
+        /* 每 2 包输出 1 包，降低串口压力（115200 baud 不足以承载 120Hz 全量输出） */
+        if (pkt_count % 2 == 0) {
+            printf("CSI,%lld,%d,%d", (long long)raw.timestamp, (int)raw.rssi, (int)num_subcarriers);
+            for (uint16_t i = 0; i < num_subcarriers; i++) {
+                int8_t imag = raw.buf[offset + 2 * i];
+                int8_t real = raw.buf[offset + 2 * i + 1];
+                printf(",%d,%d", (int)real, (int)imag);
+            }
+            printf("\n");
         }
-        printf("\n");
+
+        /* 每包都 yield，防止看门狗超时 */
+        taskYIELD();
     }
 }
 
